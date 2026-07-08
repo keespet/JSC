@@ -3,6 +3,7 @@ import { EXERCISES } from "./data/exercises.js";
 import { SOURCE_META } from "./data/sourceMeta.js";
 import { calculateResults, formatNumber, parseMethod } from "./logic/calculations.js";
 import { clearDraft, loadDraft, saveDraft } from "./logic/storage.js";
+import { isSyncConfigured, sendToN8n } from "./logic/sync.js";
 
 const SLOT_COUNT = 15;
 const TYPES = [
@@ -67,6 +68,7 @@ export default function App() {
   const [draft, setDraft] = useState(() => mergeDraft(loadDraft()));
   const [screen, setScreen] = useState("input");
   const [pickerSlot, setPickerSlot] = useState(null);
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
   const importRef = useRef(null);
 
   const results = useMemo(
@@ -108,6 +110,19 @@ export default function App() {
     setScreen("input");
   }
 
+  async function saveToServer() {
+    setSaveState("saving");
+    try {
+      await sendToN8n(draft);
+      setSaveState("saved");
+      window.setTimeout(() => setSaveState("idle"), 2500);
+    } catch (error) {
+      console.error(error);
+      setSaveState("error");
+      window.setTimeout(() => setSaveState("idle"), 4000);
+    }
+  }
+
   function exportDraft() {
     const payload = {
       version: 1,
@@ -147,6 +162,7 @@ export default function App() {
   }
 
   return (
+    <>
     <div className="app-shell">
       <header className="app-header">
         <div>
@@ -160,6 +176,17 @@ export default function App() {
           <button className="ghost-button" onClick={exportDraft}>
             Export
           </button>
+          {isSyncConfigured() && (
+            <button className="ghost-button" onClick={saveToServer} disabled={saveState === "saving"}>
+              {saveState === "saving"
+                ? "Opslaan…"
+                : saveState === "saved"
+                ? "Opgeslagen ✓"
+                : saveState === "error"
+                ? "Mislukt ✕"
+                : "Opslaan"}
+            </button>
+          )}
         </div>
       </header>
 
@@ -196,6 +223,84 @@ export default function App() {
       {screen === "data" && <DataScreen />}
 
       {pickerSlot && <ExercisePicker onClose={() => setPickerSlot(null)} onChoose={chooseExercise} />}
+    </div>
+    <PrintSchema draft={draft} results={results} />
+    </>
+  );
+}
+
+function trainingWeight(training) {
+  if (!training || training.kg === null || training.kg === undefined) return "-";
+  const value = `${formatNumber(training.kg, training.unit ? 0 : 1)} ${training.unit || "kg"}`;
+  return training.watt ? `${value} · ${formatNumber(training.watt, 0)}w` : value;
+}
+
+function sidePause(draft, role) {
+  return (role === "zwak" ? draft.overrides.weakPause : draft.overrides.strongPause) || "60";
+}
+
+function PrintSchema({ draft, results }) {
+  const items = results.exercises.filter((item) => item.exercise && (item.trainingL || item.trainingR));
+  return (
+    <div className="print-doc">
+      <div className="print-head">
+        <div>
+          <div className="print-brand">JSC · Trainingsschema</div>
+          <div className="print-sub">Toptraining</div>
+        </div>
+        <div className="print-meta">
+          <div><span>Sporter</span><strong>{draft.athlete || "-"}</strong></div>
+          <div><span>Datum</span><strong>{draft.date || "-"}</strong></div>
+          <div><span>Fase</span><strong>{draft.phase}</strong></div>
+        </div>
+      </div>
+
+      <div className="print-methods">
+        <span>Sterk: {results.strongMethod || "-"} · {results.strongSets || "-"} · {draft.overrides.strongPause || "60"}s</span>
+        <span>Zwak: {results.weakMethod || "-"} · {results.weakSets || "-"} · {draft.overrides.weakPause || "60"}s</span>
+      </div>
+
+      {items.length === 0 ? (
+        <p className="print-empty">Nog geen ingevulde oefeningen.</p>
+      ) : (
+        <table className="print-table">
+          <thead>
+            <tr>
+              <th>Nr</th>
+              <th>Oefening</th>
+              <th>Zijde</th>
+              <th>HH</th>
+              <th>Gewicht</th>
+              <th>Sets</th>
+              <th>Pauze</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => {
+              const sides =
+                item.hasRight && item.trainingR
+                  ? [
+                      { key: "L", role: item.leftRole, training: item.trainingL },
+                      { key: "R", role: item.rightRole, training: item.trainingR },
+                    ]
+                  : [{ key: "", role: item.leftRole, training: item.trainingL }];
+              return sides.map((side, index) => (
+                <tr key={`${item.id}-${side.key || "x"}`}>
+                  <td>{index === 0 ? item.exercise.nr : ""}</td>
+                  <td>{index === 0 ? item.exercise.name : ""}</td>
+                  <td>{`${side.key ? side.key + " " : ""}${side.role === "zwak" ? "Z" : "S"}`}</td>
+                  <td>{side.training ? side.training.repetitions : "-"}</td>
+                  <td>{trainingWeight(side.training)}</td>
+                  <td>{side.training?.sets || ""}</td>
+                  <td>{sidePause(draft, side.role)}s</td>
+                </tr>
+              ));
+            })}
+          </tbody>
+        </table>
+      )}
+
+      <div className="print-footer">S = sterke zijde · Z = zwakke zijde</div>
     </div>
   );
 }
@@ -373,6 +478,9 @@ function ResultsScreen({ draft, results, updateOverrides, onBack }) {
       <div className="bottom-bar">
         <button className="secondary-button" onClick={onBack}>
           Aanpassen
+        </button>
+        <button className="primary-button" onClick={() => window.print()}>
+          PDF / Afdrukken
         </button>
       </div>
     </main>
